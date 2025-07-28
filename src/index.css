@@ -48,13 +48,11 @@ button:hover {
   margin-top: 16px;
 }
 
-<<<<<<< HEAD
-=======
+
 .mb-4 {
   margin-bottom: 16px;
 }
 
->>>>>>> b9b8e22dbe1e5e36be042a646a3139c891d22a25
 .flex {
   display: flex;
 }
@@ -67,13 +65,11 @@ button:hover {
   margin-left: 16px;
 }
 
-<<<<<<< HEAD
-=======
+
 .space-x-2 > * + * {
   margin-left: 8px;
 }
 
->>>>>>> b9b8e22dbe1e5e36be042a646a3139c891d22a25
 .bg-white {
   background-color: white;
 }
@@ -92,8 +88,7 @@ button:hover {
 
 .ml-2 {
   margin-left: 8px;
-<<<<<<< HEAD
-=======
+
 }
 
 .block {
@@ -219,5 +214,4 @@ button:hover {
 
 .cursor-pointer {
   cursor: pointer;
->>>>>>> b9b8e22dbe1e5e36be042a646a3139c891d22a25
 }
