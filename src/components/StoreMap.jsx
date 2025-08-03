@@ -9,10 +9,14 @@ import { getStores, updateShelf } from '../data/StoreData';
 function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedProduct }) {
   const canvasRef = useRef(null);
   const threeCanvasRef = useRef(null);
+  const rendererRef = useRef(null); // Référence pour le renderer
+  const sceneRef = useRef(null); // Référence pour la scène
+  const cameraRef = useRef(null); // Référence pour la caméra
   const [selectedFloor, setSelectedFloor] = useState(floorId);
   const [draggingShelf, setDraggingShelf] = useState(null);
   const [rotatingShelf, setRotatingShelf] = useState(null);
   const [zoom, setZoom] = useState(1);
+  const [zoom3D, setZoom3D] = useState(1); // État pour le zoom 3D
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
@@ -25,6 +29,9 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
   const [shelves, setShelves] = useState([]);
   const [show3DModal, setShow3DModal] = useState(null);
   const [productPoint, setProductPoint] = useState(null);
+  const [is3DPanning, setIs3DPanning] = useState(false);
+  const [pan3DStart, setPan3DStart] = useState({ x: 0 });
+  const [cameraXOffset, setCameraXOffset] = useState(0);
 
   // Mettre à jour tempShelfData lorsque la prop tempShelf change
   useEffect(() => {
@@ -135,7 +142,7 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
         -(editingShelf.length * 10) / 2,
         -(editingShelf.depth * 10) / 2,
         editingShelf.length * 10,
-        shelf.depth * 10
+        editingShelf.depth * 10
       );
       const screenWidth = editingShelf.length * 10 * zoom;
       if (screenWidth > 50) {
@@ -157,15 +164,21 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
       if (shelf) {
         const productsOnFloor = shelf.products.filter((p) => p.floor === highlightedProduct.product.floor);
         const n = productsOnFloor.length;
-        const i = productsOnFloor.findIndex((p) => p.id === highlightedProduct.product.id) + 1; // Position 1-based
-        if (n > 0 && i > 0) {
-          const fraction = (i + 1) / (n + 1);
-          const pointX = shelf.position.x + fraction * shelf.length * 10;
-          const pointY = shelf.position.y + (shelf.depth * 10) / 2;
+        const i = productsOnFloor.findIndex((p) => p.id === highlightedProduct.product.id); // 0-based
+        if (n > 0 && i >= 0) {
+          const fraction = (i + 1) / (n + 1); // (i+1)/(n+1)
+          const centerX = shelf.position.x + (shelf.length * 10) / 2;
+          const centerY = shelf.position.y + (shelf.depth * 10) / 2;
+          const relativeX = fraction * shelf.length * 10 - (shelf.length * 10) / 2;
+          const relativeY = 0; // Center of depth
+          const rotationRad = (shelf.rotation || 0) * Math.PI / 180;
+          const rotatedX = relativeX * Math.cos(rotationRad) - relativeY * Math.sin(rotationRad);
+          const rotatedY = relativeX * Math.sin(rotationRad) + relativeY * Math.cos(rotationRad);
+          const pointX = centerX + rotatedX;
+          const pointY = centerY + rotatedY;
           newProductPoint = { x: pointX, y: pointY, shelf, product: highlightedProduct.product };
           ctx.save();
           ctx.translate(pointX, pointY);
-          ctx.rotate((shelf.rotation || 0) * Math.PI / 180);
           ctx.fillStyle = 'red';
           ctx.beginPath();
           ctx.arc(0, 0, 5 / zoom, 0, 2 * Math.PI);
@@ -177,6 +190,7 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
             fraction,
             pointX,
             pointY,
+            rotation: shelf.rotation || 0,
           });
         }
       }
@@ -187,30 +201,47 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
     console.log('Map rendered with shelves:', shelves, 'tempShelf:', tempShelfData, 'editingShelf:', editingShelf, 'highlightedProduct:', highlightedProduct);
   }, [storeId, selectedFloor, zoom, offset, tempShelfData, editingShelf, shelves, highlightedProduct]);
 
-  // Rendu 3D du rayon
+  // Initialisation du rendu 3D
   useEffect(() => {
-    if (!show3DModal || !threeCanvasRef.current) return;
+    if (!show3DModal || !threeCanvasRef.current) {
+      console.log('3D modal skipped: show3DModal or canvas not available');
+      return;
+    }
 
     const canvas = threeCanvasRef.current;
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xffffff); // Fond blanc pour meilleure visibilité
-    const camera = new THREE.PerspectiveCamera(75, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-    renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+    console.log('3D canvas initialized:', { width: canvas.clientWidth, height: canvas.clientHeight });
+
+    // Initialiser la scène et la caméra
+    sceneRef.current = new THREE.Scene();
+    sceneRef.current.background = new THREE.Color(0xffffff); // Fond blanc
+    const aspectRatio = canvas.clientWidth / canvas.clientHeight;
+    cameraRef.current = new THREE.PerspectiveCamera(75, aspectRatio, 0.1, 1000);
+
+    // Initialiser le renderer
+    if (!rendererRef.current) {
+      try {
+        rendererRef.current = new THREE.WebGLRenderer({ canvas, antialias: true });
+        rendererRef.current.setSize(canvas.clientWidth, canvas.clientHeight);
+        console.log('Renderer initialized');
+      } catch (error) {
+        console.error('Failed to initialize WebGLRenderer:', error);
+        return;
+      }
+    }
 
     const { shelf, product } = show3DModal;
     const shelfHeight = shelf.floors * 2; // Hauteur proportionnelle au nombre d'étages
     const shelfLength = shelf.length * 10;
 
-    // Contour du rectangle du rayon
+    // Contour du rectangle du rayon en bleu
     const planeGeometry = new THREE.PlaneGeometry(shelfLength, shelfHeight);
     const edges = new THREE.EdgesGeometry(planeGeometry);
-    const lineMaterial = new THREE.LineBasicMaterial({ color: 0x000000, linewidth: 2 });
+    const lineMaterial = new THREE.LineBasicMaterial({ color: 0x0000ff, linewidth: 2 }); // Bleu
     const outline = new THREE.LineSegments(edges, lineMaterial);
     outline.position.set(0, 0, 0);
-    scene.add(outline);
+    sceneRef.current.add(outline);
 
-    // Segments pour les étages (n-1 segments)
+    // Segments pour les étages (n-1 segments) en noir
     const n = shelf.floors;
     const lineGeometries = [];
     const lineMaterials = [];
@@ -220,51 +251,62 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
         new THREE.Vector3(-shelfLength / 2, y, 0),
         new THREE.Vector3(shelfLength / 2, y, 0),
       ]);
-      const lineMaterial = new THREE.LineBasicMaterial({ color: 0x000000, linewidth: 2 });
+      const lineMaterial = new THREE.LineBasicMaterial({ color: 0x000000, linewidth: 2 }); // Noir
       const line = new THREE.Line(lineGeometry, lineMaterial);
-      scene.add(line);
+      sceneRef.current.add(line);
       lineGeometries.push(lineGeometry);
       lineMaterials.push(lineMaterial);
     }
 
     // Point rouge pour le produit
     let sphereGeometry, sphereMaterial;
+    let productX = 0, productY = 0;
     const productsOnFloor = shelf.products.filter((p) => p.floor === product.floor);
     const numProducts = productsOnFloor.length;
-    const productIndex = productsOnFloor.findIndex((p) => p.id === product.id) + 1; // 1-based
-    if (numProducts > 0 && productIndex > 0) {
-      const fractionX = (productIndex + 1) / (numProducts + 1);
-      const x = fractionX * shelfLength - shelfLength / 2;
-      let y;
+    const productIndex = productsOnFloor.findIndex((p) => p.id === product.id); // 0-based
+    if (numProducts > 0 && productIndex >= 0) {
+      const fractionX = (productIndex + 1) / (numProducts + 1); // (i+1)/(n+1)
+      productX = fractionX * shelfLength - shelfLength / 2;
       if (product.floor === 1) {
-        y = (-shelfHeight / 2) + (0.5 / n) * shelfHeight; // Entre le bas et le premier segment
+        productY = (-shelfHeight / 2) + (0.5 / n) * shelfHeight; // Entre le bas et le premier segment
       } else {
-        y = ((product.floor - 1) / n) * shelfHeight - shelfHeight / 2 + (0.5 / n) * shelfHeight; // Entre segment k-1 et k
+        productY = ((product.floor - 1) / n) * shelfHeight - shelfHeight / 2 + (0.5 / n) * shelfHeight; // Entre segment k-1 et k
       }
-      sphereGeometry = new THREE.SphereGeometry(0.2, 32, 32);
+      sphereGeometry = new THREE.SphereGeometry(0.4, 32, 32); // Larger sphere
       sphereMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
       const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
-      sphere.position.set(x, y, 0);
-      scene.add(sphere);
+      sphere.position.set(productX, productY, 0);
+      sceneRef.current.add(sphere);
       console.log('3D product point drawn:', {
         product: product.name,
         shelfId: shelf.id,
-        x,
-        y,
+        x: productX,
+        y: productY,
         floor: product.floor,
         fractionX,
       });
     }
 
-    // Positionner la caméra
-    camera.position.z = Math.max(shelfLength, shelfHeight) * 0.75;
-    camera.lookAt(0, 0, 0);
+    // Zoom initial
+    const fovRad = (75 * Math.PI) / 180; // FOV en radians
+    const targetHeight = shelfHeight / 0.6; // ~60% de la hauteur du canvas
+    const distance = (targetHeight / 2) / Math.tan(fovRad / 2);
 
-    // Animation avec gestion d'erreurs
+    // Animation
+    let animationFrameId;
     const animate = () => {
+      if (!rendererRef.current || !threeCanvasRef.current || !sceneRef.current || !cameraRef.current) {
+        console.warn('Animation skipped: renderer, canvas, scene, or camera not available');
+        return;
+      }
+      const gl = rendererRef.current.getContext();
+      if (!gl || gl.isContextLost()) {
+        console.warn('WebGL context lost, skipping render');
+        return;
+      }
       try {
-        requestAnimationFrame(animate);
-        renderer.render(scene, camera);
+        animationFrameId = requestAnimationFrame(animate);
+        rendererRef.current.render(sceneRef.current, cameraRef.current);
       } catch (error) {
         console.error('Error in Three.js render loop:', error);
       }
@@ -273,18 +315,116 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
 
     // Nettoyage
     return () => {
-      scene.remove(outline);
-      planeGeometry.dispose();
-      edges.dispose();
-      lineMaterial.dispose();
-      lineGeometries.forEach((geo) => geo.dispose());
-      lineMaterials.forEach((mat) => mat.dispose());
-      if (sphereGeometry) sphereGeometry.dispose();
-      if (sphereMaterial) sphereMaterial.dispose();
-      renderer.dispose();
-      renderer.forceContextLoss();
+      console.log('Cleaning up 3D renderer');
+      cancelAnimationFrame(animationFrameId);
+      if (sceneRef.current) {
+        sceneRef.current.remove(outline);
+        planeGeometry.dispose();
+        edges.dispose();
+        lineMaterial.dispose();
+        lineGeometries.forEach((geo) => geo.dispose());
+        lineMaterials.forEach((mat) => mat.dispose());
+        if (sphereGeometry) sphereGeometry.dispose();
+        if (sphereMaterial) sphereMaterial.dispose();
+        sceneRef.current = null;
+      }
+      if (rendererRef.current) {
+        try {
+          rendererRef.current.dispose();
+          rendererRef.current.forceContextLoss();
+          console.log('Renderer disposed');
+        } catch (error) {
+          console.error('Error disposing renderer:', error);
+        }
+        rendererRef.current = null;
+      }
+      cameraRef.current = null;
     };
   }, [show3DModal]);
+
+  // Gestion de la caméra et du zoom 3D
+  useEffect(() => {
+    if (!show3DModal || !cameraRef.current || !threeCanvasRef.current) return;
+
+    const { shelf, product } = show3DModal;
+    const shelfHeight = shelf.floors * 2;
+    const shelfLength = shelf.length * 10;
+    let productX = 0, productY = 0;
+    const productsOnFloor = shelf.products.filter((p) => p.floor === product.floor);
+    const numProducts = productsOnFloor.length;
+    const productIndex = productsOnFloor.findIndex((p) => p.id === product.id);
+    if (numProducts > 0 && productIndex >= 0) {
+      const fractionX = (productIndex + 1) / (numProducts + 1);
+      productX = fractionX * shelfLength - shelfLength / 2;
+      if (product.floor === 1) {
+        productY = (-shelfHeight / 2) + (0.5 / shelf.floors) * shelfHeight;
+      } else {
+        productY = ((product.floor - 1) / shelf.floors) * shelfHeight - shelfHeight / 2 + (0.5 / shelf.floors) * shelfHeight;
+      }
+    }
+
+    const fovRad = (75 * Math.PI) / 180;
+    const targetHeight = shelfHeight / 0.6;
+    const distance = (targetHeight / 2) / Math.tan(fovRad / 2);
+    cameraRef.current.position.set(productX + cameraXOffset, 0, distance / zoom3D);
+    cameraRef.current.lookAt(productX + cameraXOffset, productY, 0);
+    console.log('Camera updated:', { productX, productY, cameraXOffset, zoom3D, distance });
+  }, [show3DModal, cameraXOffset, zoom3D]);
+
+  // Gestion du zoom 3D
+  const handle3DZoomIn = () => {
+    setZoom3D((prev) => Math.min(prev * 1.1, 3));
+    console.log('3D zoom in:', zoom3D);
+  };
+
+  const handle3DZoomOut = () => {
+    setZoom3D((prev) => Math.max(prev / 1.1, 0.5));
+    console.log('3D zoom out:', zoom3D);
+  };
+
+  // Gestion du panning 3D (imite le panning 2D)
+  const handle3DMouseDown = (e) => {
+    console.log('3D mousedown detected:', { clientX: e.clientX, clientY: e.clientY, button: e.button });
+    if (e.button !== 0) return; // Clic gauche uniquement
+    e.preventDefault();
+    setIs3DPanning(true);
+    setPan3DStart({ x: e.clientX });
+    console.log('3D panning started:', { x: e.clientX });
+  };
+
+  const handle3DMouseMove = (e) => {
+    console.log('Mouse move detected on 3D canvas:', { clientX: e.clientX, is3DPanning });
+    if (!is3DPanning || !threeCanvasRef.current) {
+      console.log('3D panning move skipped:', { is3DPanning, canvasAvailable: !!threeCanvasRef.current });
+      return;
+    }
+    const rect = threeCanvasRef.current.getBoundingClientRect();
+    const dx = -(e.clientX - pan3DStart.x) / (zoom3D * 10); // Inversé et ralenti (facteur 10)
+    const newOffset = cameraXOffset + dx;
+    const maxOffset = show3DModal.shelf.length * 5; // ± shelfLength / 2
+    const clampedOffset = Math.max(-maxOffset, Math.min(maxOffset, newOffset));
+    setCameraXOffset(clampedOffset);
+    setPan3DStart({ x: e.clientX });
+    console.log('3D panning move:', { dx, newOffset, clampedOffset, clientX: e.clientX, panStartX: pan3DStart.x, sensitivity: zoom3D * 10 });
+  };
+
+  const handle3DMouseUp = (e) => {
+    console.log('3D mouseup detected:', { clientX: e.clientX });
+    if (!is3DPanning) {
+      console.log('3D mouseup ignored, panning not active:', { clientX: e.clientX });
+      return;
+    }
+    setIs3DPanning(false);
+    console.log('3D panning stopped');
+  };
+
+  const handle3DMouseLeave = (e) => {
+    console.log('3D canvas mouseleave:', { clientX: e.clientX });
+    if (is3DPanning) {
+      setIs3DPanning(false);
+      console.log('3D panning stopped due to mouseleave');
+    }
+  };
 
   const handleMouseDown = (e) => {
     if (e.button !== 0) return;
@@ -302,6 +442,8 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
       const distance = Math.sqrt((x - productPoint.x) ** 2 + (y - productPoint.y) ** 2);
       if (distance < 10 / zoom) {
         setShow3DModal({ shelf: productPoint.shelf, product: productPoint.product });
+        setCameraXOffset(0); // Réinitialiser le panning
+        setZoom3D(1); // Réinitialiser le zoom 3D
         console.log('Clicked on product point, opening 3D modal:', productPoint.product.name);
         return;
       }
@@ -379,7 +521,7 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
       const centerY = editingShelf.position.y + (editingShelf.depth * 10) / 2;
       const rotatedX =
         Math.cos(-(editingShelf.rotation || 0) * Math.PI / 180) * (x - centerX) +
-        Math.sin(-(shelf.rotation || 0) * Math.PI / 180) * (y - centerY) +
+        Math.sin(-(editingShelf.rotation || 0) * Math.PI / 180) * (y - centerY) +
         centerX;
       const rotatedY =
         -Math.sin(-(editingShelf.rotation || 0) * Math.PI / 180) * (x - centerX) +
@@ -408,7 +550,7 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
     if (mode === 'none') {
       setIsPanning(true);
       setPanStart({ x: e.clientX, y: e.clientY });
-      console.log('Panning started:', { x: e.clientX, y: e.clientY });
+      console.log('2D panning started:', { x: e.clientX, y: e.clientY });
     }
   };
 
@@ -421,9 +563,10 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
     if (isPanning && mode === 'none') {
       const dx = (e.clientX - panStart.x) / zoom;
       const dy = (e.clientY - panStart.y) / zoom;
-      setOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }));
+      const newOffset = { x: offset.x + dx, y: offset.y + dy };
+      setOffset(newOffset);
       setPanStart({ x: e.clientX, y: e.clientY });
-      console.log('Panning:', { dx, dy, offset: { x: offset.x + dx, y: offset.y + dy } });
+      console.log('2D panning:', { dx, dy, offset: newOffset });
     } else if (draggingShelf && editingShelf && mode === 'move') {
       const newX = x - draggingShelf.offsetX;
       const newY = y - draggingShelf.offsetY;
@@ -460,16 +603,20 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
     setDraggingShelf(null);
     setRotatingShelf(null);
     setIsPanning(false);
-    console.log('Mouse up, panning stopped');
+    console.log('2D panning stopped');
   };
 
   const handleContextMenuClick = (action) => {
     if (!contextMenu) return;
     if (action === 'edit') {
-      onEditShelf(contextMenu.shelf.id);
-      setMode('none');
-      setEditingShelf(null);
-      setInitialShelfState(null);
+      if (typeof onEditShelf === 'function') {
+        onEditShelf(contextMenu.shelf.id);
+        setMode('none');
+        setEditingShelf(null);
+        setInitialShelfState(null);
+      } else {
+        console.warn('onEditShelf is not a function. Ensure it is passed correctly in admin mode.');
+      }
     } else if (action === 'move') {
       setMode('move');
       setDraggingShelf({
@@ -508,44 +655,12 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
 
   const handleZoomIn = () => {
     setZoom((prev) => Math.min(prev * 1.1, 3));
-    console.log('Zoom in:', zoom);
+    console.log('2D zoom in:', zoom);
   };
 
   const handleZoomOut = () => {
     setZoom((prev) => Math.max(prev / 1.1, 0.5));
-    console.log('Zoom out:', zoom);
-  };
-
-  const handleConfirm = () => {
-    if (editingShelf) {
-      updateShelf(storeId, selectedFloor, editingShelf.id, { ...editingShelf });
-      setEditingShelf(null);
-      setInitialShelfState(null);
-      setMode('none');
-      const stores = getStores();
-      const store = stores.find((s) => s.id === storeId) || { floors: [{ id: 1, shelves: [] }] };
-      const floor = store.floors.find((f) => f.id === selectedFloor) || { shelves: [] };
-      setShelves([...(floor.shelves || [])]);
-      console.log('Placed shelf edit confirmed:', editingShelf);
-    }
-  };
-
-  const handleCancel = () => {
-    if (tempShelfData && !tempShelfData.isPlaced) {
-      setTempShelfData(null);
-      console.log('Shelf placement cancelled');
-    } else if (editingShelf && initialShelfState) {
-      setEditingShelf({ ...initialShelfState });
-      updateShelf(storeId, selectedFloor, editingShelf.id, { ...initialShelfState });
-      setEditingShelf(null);
-      setInitialShelfState(null);
-      setMode('none');
-      const stores = getStores();
-      const store = stores.find((s) => s.id === storeId) || { floors: [{ id: 1, shelves: [] }] };
-      const floor = store.floors.find((f) => f.id === selectedFloor) || { shelves: [] };
-      setShelves([...(floor.shelves || [])]);
-      console.log('Placed shelf edit cancelled, restored to:', initialShelfState);
-    }
+    console.log('2D zoom out:', zoom);
   };
 
   const handleFloorChange = (e) => {
@@ -573,13 +688,31 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
         {(tempShelfData && !tempShelfData.isPlaced) || editingShelf ? (
           <div className="mt-4 flex space-x-2">
             <button
-              onClick={handleConfirm}
+              onClick={() => {
+                if (tempShelfData && !tempShelfData.isPlaced) {
+                  updateShelf(storeId, selectedFloor, tempShelfData.id, { ...tempShelfData, isPlaced: true });
+                  setTempShelfData(null);
+                } else if (editingShelf) {
+                  updateShelf(storeId, selectedFloor, editingShelf.id, editingShelf);
+                  setEditingShelf(null);
+                  setInitialShelfState(null);
+                  setMode('none');
+                }
+              }}
               className="bg-green-500 text-white px-2 py-1 rounded flex items-center"
             >
               ✓ Valider
             </button>
             <button
-              onClick={handleCancel}
+              onClick={() => {
+                if (tempShelfData && !tempShelfData.isPlaced) {
+                  setTempShelfData(null);
+                } else if (editingShelf) {
+                  setEditingShelf(null);
+                  setInitialShelfState(null);
+                  setMode('none');
+                }
+              }}
               className="bg-red-500 text-white px-2 py-1 rounded flex items-center"
             >
               ✗ Annuler
@@ -599,7 +732,7 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
           Astuce : Clic gauche sur un rayon pour ouvrir le menu, clic gauche ailleurs pour déplacer la carte, boutons +/- pour zoomer, clic sur le point rouge pour voir le rayon en 3D.
         </p>
       </div>
-      <div className="ml-4 flex flex-col space-y-2">
+      <div className="ml-4 flex flex-col space-y-2" style={{ zIndex: 0 }}>
         <button
           onClick={handleZoomIn}
           className="bg-blue-500 text-white px-2 py-1 rounded w-10 h-10 flex items-center justify-center"
@@ -618,12 +751,14 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
           className="absolute bg-white border shadow-lg rounded"
           style={{ top: contextMenu.y, left: contextMenu.x }}
         >
-          <button
-            onClick={() => handleContextMenuClick('edit')}
-            className="block px-4 py-2 text-left hover:bg-gray-100 w-full"
-          >
-            Modifier
-          </button>
+          {typeof onEditShelf === 'function' && (
+            <button
+              onClick={() => handleContextMenuClick('edit')}
+              className="block px-4 py-2 text-left hover:bg-gray-100 w-full"
+            >
+              Modifier
+            </button>
+          )}
           <button
             onClick={() => handleContextMenuClick('move')}
             className="block px-4 py-2 text-left hover:bg-gray-100 w-full"
@@ -686,13 +821,38 @@ function StoreMap({ storeId, floorId = 1, tempShelf, onEditShelf, highlightedPro
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center">
           <div className="bg-white p-4 rounded max-w-lg w-full">
             <h3 className="text-lg mb-2">Visualisation 3D du rayon {show3DModal.shelf.name}</h3>
-            <canvas
-              ref={threeCanvasRef}
-              style={{ width: '400px', height: '400px' }}
-              className="border"
-            />
+            <div className="flex items-center space-x-2">
+              <canvas
+                ref={threeCanvasRef}
+                style={{ width: '400px', height: '400px', cursor: is3DPanning ? 'grabbing' : 'grab', zIndex: 100, border: '2px solid red' }}
+                className="border"
+                onMouseDown={handle3DMouseDown}
+                onMouseMove={handle3DMouseMove}
+                onMouseUp={handle3DMouseUp}
+                onMouseLeave={handle3DMouseLeave}
+              />
+              <div className="flex flex-col space-y-2" style={{ zIndex: 0 }}>
+                <button
+                  onClick={handle3DZoomIn}
+                  className="bg-blue-500 text-white px-2 py-1 rounded w-10 h-10 flex items-center justify-center"
+                >
+                  +
+                </button>
+                <button
+                  onClick={handle3DZoomOut}
+                  className="bg-blue-500 text-white px-2 py-1 rounded w-10 h-10 flex items-center justify-center"
+                >
+                  −
+                </button>
+              </div>
+            </div>
+            <p className="mt-2">Astuce : Clic gauche et glissez horizontalement pour déplacer la vue, boutons +/- pour zoomer.</p>
             <button
-              onClick={() => setShow3DModal(null)}
+              onClick={() => {
+                setShow3DModal(null);
+                setCameraXOffset(0); // Reset panning on close
+                setZoom3D(1); // Reset zoom on close
+              }}
               className="mt-4 bg-blue-500 text-white px-4 py-2 rounded"
             >
               Fermer
